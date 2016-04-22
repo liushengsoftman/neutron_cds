@@ -63,6 +63,10 @@ class RouterInfo(object):
         self.routes = []
         self.agent_conf = agent_conf
         self.driver = interface_driver
+        # Note:these variable is used for floatingip QoS(based on TC in linux)
+        self.fip_class_ratelimit_dict = {}
+        self.available_classes = set(xrange(11, 65530))
+
         # radvd is a neutron.agent.linux.ra.DaemonMonitor
         self.radvd = None
 
