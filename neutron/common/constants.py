@@ -52,6 +52,7 @@ L3_AGENT_MODE = 'agent_mode'
 DEVICE_ID_RESERVED_DHCP_PORT = "reserved_dhcp_port"
 
 FLOATINGIP_KEY = '_floatingips'
+CDS_GW_FIP_KEY = '_cds_gw_floatingips'
 INTERFACE_KEY = '_interfaces'
 HA_INTERFACE_KEY = '_ha_interface'
 HA_ROUTER_STATE_KEY = '_ha_state'

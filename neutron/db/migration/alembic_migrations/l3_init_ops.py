@@ -61,6 +61,8 @@ def upgrade():
         sa.Column('fixed_port_id', sa.String(length=36), nullable=True),
         sa.Column('fixed_ip_address', sa.String(length=64), nullable=True),
         sa.Column('router_id', sa.String(length=36), nullable=True),
+        # add a new column for floatingip QoS
+        sa.Column('rate_limit', sa.Integer(), nullable=True, default=1024),
         sa.ForeignKeyConstraint(['fixed_port_id'], ['ports.id'], ),
         sa.ForeignKeyConstraint(['floating_port_id'], ['ports.id'], ),
         sa.ForeignKeyConstraint(['router_id'], ['routers.id'], ),

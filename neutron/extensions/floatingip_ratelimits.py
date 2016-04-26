@@ -54,15 +54,16 @@ def _validate_rate_limit(rate_limit, valid_values=None):
             rate_limit == 0 or rate_limit % 1024 != 0):
         raise InvalidRatelimit()
 
-    maximum = cfg.CONF.cds_conf.maximum_ratelimit * 1024
-    if maximum > 0 and rate_limit > maximum:
-        raise OverMaximum(maximum=maximum, input=rate_limit)
+    # the maxinum rate_limit is not necessary
+    # maximum = cfg.CONF.unitedstack.maximum_ratelimit * 1024
+    # if maximum > 0 and rate_limit > maximum:
+    #    raise OverMaximum(maximum=maximum, input=rate_limit)
 
 attr.validators['type:fip_rate_limit'] = _validate_rate_limit
 
 EXTENDED_ATTRIBUTES_2_0 = {
     l3.FLOATINGIPS: {
-        # NOTE(gongysh) since we have no update floatingip API,
+        # NOTE since we have no update floatingip API,
         # the allow_put is given as False, but we use a special API
         # to change the ratelimit
         RATE_LIMIT: {'allow_post': True, 'allow_put': False,

@@ -78,6 +78,7 @@ class RouterExternalGatewayInUseByFloatingIp(nexception.InUse):
 
 ROUTERS = 'routers'
 EXTERNAL_GW_INFO = 'external_gateway_info'
+FLOATINGIPS = 'floatingips'
 
 RESOURCE_ATTRIBUTE_MAP = {
     ROUTERS: {

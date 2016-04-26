@@ -86,4 +86,7 @@ OPTS = [
                default='0x2',
                help=_('Iptables mangle mark used to mark ingress from '
                       'external network')),
+    # add for Floatingip QoS
+    cfg.BoolOpt('l3_fip_in_qos', default=False,
+                help=_('Enable to limit the input traffic.')),
 ]

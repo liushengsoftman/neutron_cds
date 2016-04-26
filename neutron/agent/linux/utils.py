@@ -107,6 +107,7 @@ def execute(cmd, process_input=None, addl_env=None,
             extra_ok_codes=None, run_as_root=False):
     try:
         if run_as_root and cfg.CONF.AGENT.root_helper_daemon:
+        # if False:
             returncode, _stdout, _stderr = (
                 execute_rootwrap_daemon(cmd, process_input, addl_env))
         else:

@@ -32,6 +32,11 @@ EXTERNAL_DEV_PREFIX = namespaces.EXTERNAL_DEV_PREFIX
 EXTERNAL_INGRESS_MARK_MASK = '0xffffffff'
 FLOATINGIP_STATUS_NOCHANGE = object()
 
+# these iptables chain is added for metering floatingip traffic
+TOP_CHAIN = 'meter-cds'
+WRAP_NAME = 'neutron-vpn-agen-'   # this iptable chain name is not proper
+FIP_CHAIN_SIZE = 10
+TOP_CHAIN_NAME = WRAP_NAME + TOP_CHAIN
 
 class RouterInfo(object):
 
@@ -451,6 +456,7 @@ class RouterInfo(object):
 
     def _external_gateway_added(self, ex_gw_port, interface_name,
                                 ns_name, preserve_ips):
+        call_create_ratelimit_qdisc = True
         self._plug_external_gateway(ex_gw_port, interface_name, ns_name)
 
         # Build up the interface and gateway IP addresses that
@@ -462,6 +468,12 @@ class RouterInfo(object):
         if self.use_ipv6 and not self.is_v6_gateway_set(gateway_ips):
             # There is no IPv6 gw_ip, use RouterAdvt for default route.
             enable_ra_on_gw = True
+        ip_wrapper = ip_lib.IPWrapper(namespace=ns_name)
+        # add TC root qdisc when add external gateway
+        if call_create_ratelimit_qdisc:
+            LOG.info('router %s in netns %s _create_ratelimit_qdisc called', self.router_id, ns_name)
+            self._create_ratelimit_qdisc( ip_wrapper, interface_name)
+
         self.driver.init_l3(interface_name,
                             ip_cidrs,
                             namespace=ns_name,
@@ -498,6 +510,9 @@ class RouterInfo(object):
                            bridge=self.agent_conf.external_network_bridge,
                            namespace=self.ns_name,
                            prefix=EXTERNAL_DEV_PREFIX)
+        # delete the TC root qdisc when delete the external gateway
+        ip_wrapper = ip_lib.IPWrapper(namespace=self.ns_name)
+        self._delete_ratelimit_qdisc(self, ip_wrapper, interface_name)
 
     def _process_external_gateway(self, ex_gw_port):
         # TODO(Carl) Refactor to clarify roles of ex_gw_port vs self.ex_gw_port
@@ -606,6 +621,9 @@ class RouterInfo(object):
                 # Process SNAT/DNAT rules and addresses for floating IPs
                 self.process_snat_dnat_for_fip()
 
+                self.process_router_floating_ip_ratelimit_rules(self, ex_gw_port)
+                LOG.info('router %s self.process_router_floating_ip_ratelimit_rules', self.router_id)
+
             # Once NAT rules for floating IPs are safely in place
             # configure their addresses on the external gateway port
             interface_name = self.get_external_device_interface_name(
@@ -631,7 +649,7 @@ class RouterInfo(object):
         """
         self._process_internal_ports()
         self.process_external(agent)
-        # Process static routes for router
+        # Process static routes for router,using command: ip router xxx
         self.routes_updated()
 
         # Update ex_gw_port and enable_snat on the router info cache
@@ -639,3 +657,217 @@ class RouterInfo(object):
         self.snat_ports = self.router.get(
             l3_constants.SNAT_ROUTER_INTF_KEY, [])
         self.enable_snat = self.router.get('enable_snat')
+
+    def _create_ratelimit_qdisc(self, ip_wrapper, interface_name):
+        LOG.debug("create ratelimit stuff for device %s", interface_name)
+        default_class = 10
+        # clear all previous egress qdisc. starts with a clean environment
+        tc_cmd = ['tc', 'qdisc', 'del', 'dev', interface_name, 'root']
+        ip_wrapper.netns.execute(tc_cmd, check_exit_code=False)
+        LOG.info("delete qdisc root interface %s cmd %s", interface_name, tc_cmd)
+        # attach qdisc to interface
+        tc_cmd = ['tc', 'qdisc', 'add', 'dev', interface_name,
+                  'root', 'handle', '1:0', 'htb', 'default',
+                  '%x' % default_class]
+        LOG.info("====attach qdisc to interface %s cmd %s", interface_name, tc_cmd)
+        ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+        LOG.info("====after attach qdisc to interface %s cmd %s", interface_name, tc_cmd)
+        interfaces = [interface_name]
+        # need to delete the old ifb from previous version
+        ifb0 = self._get_internal_device(interface_name)
+        # add egress qdisc for ifb0
+        tc_cmd = ['ip', 'link', 'delete', ifb0]
+        ip_wrapper.netns.execute(tc_cmd, check_exit_code=False)
+        LOG.info("====redirect ingress traffic to ifb-interface %s ", ifb0)
+        # if self.conf.l3_fip_in_qos:
+        if True:
+            tc_cmd = ['ip', 'link', 'add', ifb0, 'type', 'ifb']
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            tc_cmd = ['ip', 'link', 'set', 'dev', ifb0, 'up']
+            LOG.info("redirect ingress traffic: add ifb-interface %s ", ifb0)
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            tc_cmd = ['tc', 'qdisc', 'add', 'dev', ifb0,
+                      'root', 'handle', '1:', 'htb', 'default',
+                      '%x' % default_class]
+            LOG.info("attach qdisc to ifb-interface %s cmd %s", ifb0, tc_cmd)
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+
+            # add ingress traffic redirect to ifb0
+            tc_cmd = ['tc', 'qdisc', 'del', 'dev', interface_name, 'ingress']
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=False)
+            tc_cmd = ['tc', 'qdisc', 'add', 'dev', interface_name,
+                      'handle', 'ffff:', 'ingress']
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            tc_cmd = ['tc', 'filter', 'add', 'dev', interface_name,
+                      'parent', 'ffff:', 'protocol', 'ip', 'u32',
+                      'match', 'u32', '0', '0', 'action', 'mirred',
+                      'egress', 'redirect', 'dev', ifb0]
+            LOG.info("attach tc filter to ifb-interface %s cmd %s", ifb0, tc_cmd)
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            interfaces.append(ifb0)
+
+        # add default class filter and leaf qdisc
+        self._add_class_filter(
+            ip_wrapper, default_class, interfaces, 1024)
+        self.fip_class_ratelimit_dict = {}
+        self.available_classes = set(xrange(11, 65530))
+
+    def _delete_ratelimit_qdisc(self, ip_wrapper, interface_name):
+        """Is called after qg-xxx is unpluged."""
+        if not self.conf.l3_fip_in_qos:
+            return
+        ifb = self._get_internal_device(interface_name)
+        tc_cmd = ['ip', 'link', 'delete', ifb]
+        ip_wrapper.netns.execute(tc_cmd, check_exit_code=False)
+
+    def process_router_floating_ip_ratelimit_rules(self, ex_gw_port=None):
+        """Configure rate limit and metering rules for the router's floating IPs.
+
+        Configures tc and iptables rules for the floating ips of the given router
+        """
+        if ex_gw_port:
+            interface_name = self.get_external_device_name(ex_gw_port['id'])
+            LOG.info('router %s ,namespace %s ,start process_rate_limit in interface %s', self.router_id,
+                     self.ns_name, interface_name)
+            self.process_rate_limit(self, interface_name)
+
+    def process_rate_limit(self, external_interface):
+        interfaces = [external_interface]
+        #if self.conf.l3_fip_in_qos:
+        if True:
+            _interface = self._get_internal_device(external_interface)
+            interfaces.append(_interface)
+        available_fips = set()
+        ip_wrapper = ip_lib.IPWrapper(namespace=self.ns_name)
+        if LOG.logger.isEnabledFor(10):
+            LOG.debug("process_rate_limit before fip class map %s",
+                      jsonutils.dumps(self.fip_class_ratelimit_dict,
+                                      indent=5))
+        fips = []
+        for fip in self.router.get(l3_constants.FLOATINGIP_KEY, []):
+            fips.append({'floating_ip_address':
+                         fip['floating_ip_address'],
+                         'rate_limit': fip['rate_limit'],
+                         'id': fip['id']})
+        for fip in self.router.get(l3_constants.CDS_GW_FIP_KEY, []):
+            fips.append({'floating_ip_address':
+                         fip['floating_ip_address'],
+                         'rate_limit': fip['rate_limit'],
+                         'id': fip['id']})
+        gw_port = self.router.get('gw_port')
+        LOG.debug("get the gw_port details %s", gw_port)
+        if gw_port:
+            rate_limit = gw_port.get('rate_limit', 0)
+            if rate_limit > 0:
+                fip_id = gw_port['device_id']
+                fip_ip = gw_port['fixed_ips'][0]['ip_address']
+                fips.append({'floating_ip_address': fip_ip,
+                             'rate_limit': rate_limit,
+                             'id': fip_id})
+        for fip in fips:
+            LOG.debug("FIP process_rate_limit %s", fip)
+            fip_ip = fip['floating_ip_address']
+            rate_limit = fip.get('rate_limit', 0)
+            if rate_limit > 0:
+                available_fips.add(fip['id'])
+                if not self.available_classes:
+                    LOG.error(
+                        _("No class id available for floatingip-id=%s"),
+                        fip['id'])
+                    return
+                class_rate = self.fip_class_ratelimit_dict.get(fip['id'], {})
+                if not class_rate:
+                    class_rate['minor_id'] = self.available_classes.pop()
+                self.fip_class_ratelimit_dict[fip['id']] = class_rate
+                minor_id = class_rate['minor_id']
+                old_rate_limit = class_rate.get('rate_limit', 0)
+                if (old_rate_limit != rate_limit):
+                    self._add_class_filter(ip_wrapper, minor_id,
+                                           interfaces,
+                                           rate_limit, fip_ip=fip_ip)
+                    class_rate['rate_limit'] = rate_limit
+                    class_rate['fip_ip'] = fip_ip
+        deleted_ips = set(self.fip_class_ratelimit_dict.keys()) - available_fips
+        LOG.debug("Deleted fixed ips %s", deleted_ips)
+        for fip_id in deleted_ips:
+            class_rate = self.fip_class_ratelimit_dict[fip_id]
+            self._delete_class_filter(
+                ip_wrapper, class_rate['minor_id'],
+                interfaces, class_rate['fip_ip'])
+            self.fip_class_ratelimit_dict.pop(fip_id, None)
+            self.available_classes.add(class_rate['minor_id'])
+        if LOG.logger.isEnabledFor(10):
+            LOG.debug("process_rate_limit end fip class map %s",
+                      jsonutils.dumps(self.fip_class_ratelimit_dict,
+                                      indent=5))
+
+    def _delete_class_filter(self, ip_wrapper, minor_id, devs,
+                             fip_ip):
+        for _int_name in devs:
+            # we must delete filter first
+            # delete filters (filtering by fwmark)
+            tc_cmd = self._get_delete_filter_cmd(
+                _int_name, fip_ip, minor_id)
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            # and then classes, which will delete the leaf qdisc
+            tc_cmd = ['tc', 'class', 'delete', 'dev', _int_name,
+                      'parent', '1:', 'classid', '1:%x' % minor_id]
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+
+    def _add_class_filter(self, ip_wrapper, minor_id, devs,
+                          rate_limit, fip_ip=None):
+        for _int_name in devs:
+            if not _int_name:
+                continue
+            burst = str(int(rate_limit) / 100)
+            # add classes according to rate limit
+            tc_cmd = ['tc', 'class', 'replace', 'dev', _int_name,
+                      'parent', '1:', 'classid',
+                      '1:%x' % minor_id, 'htb',
+                      'rate', '%skbit' % rate_limit, 'ceil',
+                      '%skbit' % rate_limit,
+                      'burst', '%sk' % burst, 'cburst',
+                      '%sk' % burst, 'prio', '10']
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            # add leaf sfq qdisc according
+            tc_cmd = ['tc', 'qdisc', 'replace', 'dev', _int_name,
+                      'parent', '1:%x' % minor_id, 'handle',
+                      '%x:' % minor_id, 'sfq']
+            ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+            if fip_ip:
+                tc_cmd = self._get_replace_filter_cmd(
+                    _int_name, fip_ip, minor_id)
+                ip_wrapper.netns.execute(tc_cmd, check_exit_code=True)
+
+    def _get_replace_filter_cmd(self, interface, addr, minor):
+        srcflag = interface.startswith("qg-")
+        # we use different prio so that we can delete it via prio
+        tccmd = ("tc filter replace dev %(interface)s parent 1: protocol "
+                 "ip prio %(minor)d u32 match ip %(src_dst)s %(addr)s/32 "
+                 "flowid 1:%(minor)x") % {"interface": interface,
+                                   "src_dst": (srcflag and "src" or "dst"),
+                                   "addr": addr,
+                                   "minor": minor}
+        LOG.debug("_get_replace_filter_cmd: %s", tccmd)
+        return tccmd.split()
+
+    def _get_delete_filter_cmd(self, interface, addr, minor):
+        tccmd = ("tc filter delete dev %(interface)s parent 1: protocol "
+                 "ip prio %(minor)d") % {"interface": interface,
+                                         "minor": minor}
+        LOG.debug("_get_delete_filter_cmd: %s", tccmd)
+        return tccmd.split()
+
+    # get the name of virtual interface (ifb-xxxx)
+    # which will be used to redirect ingress traffic
+    def _get_internal_device(self, external_interface):
+        return 'ifb' + external_interface.split("qg-", 1)[1]
+
+    def get_qg_device_name(self):
+        # 14 is the length of qg device in router
+        gw_port_id = self.router.get('gw_port_id', None)
+        if gw_port_id:
+            return ('qg-' + self.router['gw_port_id'])[:14]
+        LOG.debug('This router %s does not have gw_port' % ri.router)
+        return None
+

@@ -753,7 +753,7 @@ class L3_NAT_dbonly_mixin(l3.RouterPluginBase):
             raise l3.FloatingIPNotFound(floatingip_id=id)
         return floatingip
 
-    def _make_floatingip_dict(self, floatingip, fields=None):
+    def _make_floatingip_dict(self, floatingip, fields=None, process_extensions=True):
         res = {'id': floatingip['id'],
                'tenant_id': floatingip['tenant_id'],
                'floating_ip_address': floatingip['floating_ip_address'],
